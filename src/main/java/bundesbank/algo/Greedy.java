@@ -7,78 +7,137 @@ import bundesbank.file.Task;
 import java.util.*;
 
 public class Greedy {
+    // Globale Referenz auf Münzwerte für Candidate
+    private static int[] coinValues;
+
     public static void solve(Task task, int days, FileSaver saver) {
         List<Bank> banks = task.bankList();
-        int[] coinValues = task.coinValues();
-        int B = banks.size();
+        coinValues = task.coinValues();
+        int M = coinValues.length;
 
-        // 1) Pro Bank: IDs sortieren (absteigend nach Wert)
-        int[][] sortedCoins = new int[B][];
-        for (int j = 0; j < B; j++) {
-            Bank b = banks.get(j);
+        // Für schnelle Duplikat-Erkennung
+        boolean[] scanned = new boolean[M];
+
+        // Pro Bank: Münzen absteigend nach Wert sortieren
+        List<int[]> sortedCoins = new ArrayList<>(banks.size());
+        for (Bank b : banks) {
             int[] raw = b.bankCoinIDs();
             Integer[] boxed = Arrays.stream(raw).boxed().toArray(Integer[]::new);
             Arrays.sort(boxed, (a, b2) -> Integer.compare(coinValues[b2], coinValues[a]));
-            sortedCoins[j] = Arrays.stream(boxed).mapToInt(i -> i).toArray();
+            int[] ids = Arrays.stream(boxed).mapToInt(Integer::intValue).toArray();
+            sortedCoins.add(ids);
         }
 
-        // 2) Für jede Bank einen statischen Score berechnen: Summe der Top-cap-Werte / Registrierungsdauer
-        record Candidate(int idx, Bank bank, int[] coins, double score) {}
-        List<Candidate> cand = new ArrayList<>(B);
-
-        for (int j = 0; j < B; j++) {
-            Bank b = banks.get(j);
-            int regDays = b.bankDays();
-            int maxSend = b.transactionCount() * Math.max(0, days - regDays);
-            int cap = Math.min(maxSend, sortedCoins[j].length);
-            long sum = 0;
-            for (int k = 0; k < cap; k++) {
-                sum += coinValues[sortedCoins[j][k]];
-            }
-            double score = regDays > 0 ? (double) sum / regDays : 0;
-            cand.add(new Candidate(j, b, sortedCoins[j], score));
+        // Priority-Queue mit Lazy-Update: sortiert nach aktuellem Score
+        PriorityQueue<Candidate> pq = new PriorityQueue<>();
+        for (int j = 0; j < banks.size(); j++) {
+            pq.offer(new Candidate(j, banks.get(j), sortedCoins.get(j)));
         }
 
-        // 3) Einmalig nach Score absteigend sortieren
-        cand.sort((a, b) -> Double.compare(b.score, a.score));
-
-        // 4) Registration in dieser Reihenfolge abarbeiten, bis keine Zeit mehr bleibt
-        boolean[] scanned = new boolean[coinValues.length];
-        int currentTime = 0;
+        int currentTime = 0;           // Kalender für Registrierungsende
         List<OutputBank> output = new ArrayList<>();
 
-        for (var c : cand) {
-            Bank b = c.bank;
-            int regDays = b.bankDays();
-            if (currentTime + regDays >= days) break;  // keine Zeit mehr für Registrierung
+        // Solange noch Registrierung möglich und Kandidaten existieren
+        while (currentTime < days && !pq.isEmpty()) {
+            Candidate best;
+            // Lazy-Pop/Update
+            while (true) {
+                best = pq.poll();
+                if (best == null) break;
 
-            // verfügbare Scan-Tage danach
-            currentTime += regDays;
+                int availForScore = days - (currentTime + best.bank.bankDays());
+                if (availForScore <= 0) {
+                    best.currentScore = 0;
+                } else {
+                    best.recalc(currentTime, days, scanned);
+                }
+
+                Candidate next = pq.peek();
+                if (next == null || best.currentScore >= next.currentScore) {
+                    break;
+                }
+                pq.offer(best);
+            }
+
+            if (best == null || best.currentScore <= 0) {
+                break;
+            }
+
+            // 1) Registrierung abschließen
+            currentTime += best.bank.bankDays();
+            // 2) Rest-Tage prüfen
             int availDays = days - currentTime;
-            int cap = Math.min(b.transactionCount() * availDays, c.coins.length);
+            if (availDays <= 0) {
+                break;  // keine Scan-Tage mehr übrig
+            }
 
+            // 3) Kapazität berechnen (long zur Vermeidung von Überlauf)
+            long rawCap = (long) best.bank.transactionCount() * availDays;
+            int cap = (int) Math.min(rawCap, best.coinIDs.length);
+            cap = Math.max(0, cap);  // sicherstellen, dass cap ≥ 0 ist
+
+            // 4) Münzen zum Scannen auswählen
             List<Integer> toScan = new ArrayList<>(cap);
             int taken = 0;
-            for (int id : c.coins) {
-                if (!scanned[id]) {
-                    scanned[id] = true;
-                    toScan.add(id);
+            for (int coinId : best.coinIDs) {
+                if (!scanned[coinId]) {
+                    scanned[coinId] = true;
+                    toScan.add(coinId);
                     if (++taken == cap) break;
                 }
             }
+
             if (!toScan.isEmpty()) {
-                output.add(new OutputBank(c.idx, toScan));
+                output.add(new OutputBank(best.bankIndex, toScan));
             }
+            // best.bank wird nicht zurück in pq gegeben, da abgearbeitet
         }
 
-        // 5) Ausgabe
+        // Ausgabe formatieren
         saver.append(String.valueOf(output.size()));
         for (OutputBank ob : output) {
             saver.append(ob.bankId + " " + ob.coins.size());
-            for (int coin : ob.coins) {
-                saver.appendIn(String.valueOf(coin));
+            for (int c : ob.coins) {
+                saver.appendIn(String.valueOf(c));
             }
             saver.append("");
+        }
+    }
+
+    private static class Candidate implements Comparable<Candidate> {
+        final int bankIndex;
+        final Bank bank;
+        final int[] coinIDs;
+        double currentScore = 0;
+
+        Candidate(int bankIndex, Bank bank, int[] sortedCoins) {
+            this.bankIndex = bankIndex;
+            this.bank = bank;
+            this.coinIDs = sortedCoins;
+        }
+
+        void recalc(int currentTime, int totalDays, boolean[] scanned) {
+            int regEnd = currentTime + bank.bankDays();
+            int availDays = totalDays - regEnd;
+            if (availDays <= 0) {
+                currentScore = 0;
+                return;
+            }
+            int cap = Math.min(bank.transactionCount() * availDays, coinIDs.length);
+            long sum = 0;
+            int taken = 0;
+            for (int id : coinIDs) {
+                if (!scanned[id]) {
+                    sum += coinValues[id];
+                    if (++taken == cap) break;
+                }
+            }
+            currentScore = (double) sum / bank.bankDays();
+        }
+
+        @Override
+        public int compareTo(Candidate o) {
+            return Double.compare(o.currentScore, this.currentScore);
         }
     }
 
