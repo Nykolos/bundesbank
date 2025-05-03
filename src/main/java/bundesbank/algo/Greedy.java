@@ -7,178 +7,130 @@ import bundesbank.file.Task;
 import java.util.*;
 
 public class Greedy {
+    // Globale Referenz auf Münzwerte für Candidate
+    private static int[] coinValues;
+
     public static void solve(Task task, int days, FileSaver saver) {
-        Set<Integer> scannedCoins = new HashSet<>();
-        int currentDay = 0;
+        List<Bank> banks = task.bankList();
+        coinValues = task.coinValues();
+        int M = coinValues.length;
+
+        // Für schnelle Duplikat-Erkennung
+        boolean[] scanned = new boolean[M];
+
+        // Pro Bank: Münzen absteigend nach Wert sortieren
+        List<int[]> sortedCoins = new ArrayList<>(banks.size());
+        for (Bank b : banks) {
+            // IDs boxen, nach Wert absteigend sortieren und wieder auspacken
+            int[] raw = b.bankCoinIDs();
+            Integer[] boxed = Arrays.stream(raw).boxed().toArray(Integer[]::new);
+            Arrays.sort(boxed, (a, b2) -> Integer.compare(coinValues[b2], coinValues[a]));
+            int[] ids = Arrays.stream(boxed).mapToInt(Integer::intValue).toArray();
+            sortedCoins.add(ids);
+        }
+
+        // Priority-Queue mit Lazy-Update: sortiert nach aktuellem Score
+        PriorityQueue<Candidate> pq = new PriorityQueue<>();
+        for (int j = 0; j < banks.size(); j++) {
+            pq.offer(new Candidate(j, banks.get(j), sortedCoins.get(j)));
+        }
+
+        int currentTime = 0;           // Kalender für Registrierungsende
         List<OutputBank> output = new ArrayList<>();
-        List<Bank> availableBanks = new ArrayList<>(task.bankList());
 
-        // Sortiere Banken nach Effizienzpotential (vorberechnet)
-        Map<Bank, Double> bankPotential = new HashMap<>();
-        for (Bank bank : availableBanks) {
-            int uniqueCoins = 0;
-            int totalValue = 0;
-            Set<Integer> seen = new HashSet<>();
+        // Solange noch Registrierung möglich und Kandidaten existieren
+        while (currentTime < days && !pq.isEmpty()) {
+            Candidate best;
+            // Lazy-Pop/Update
+            while (true) {
+                best = pq.poll();
+                if (best == null) break;
 
-            for (int coinId : bank.bankCoinIDs()) {
-                if (!seen.contains(coinId)) {
-                    totalValue += task.coinValues()[coinId];
-                    uniqueCoins++;
-                    seen.add(coinId);
+                // Verfügbare Tage nach Registrierung
+                int availDays = days - (currentTime + best.bank.bankDays());
+                if (availDays <= 0) {
+                    best.currentScore = 0;
+                } else {
+                    best.recalc(currentTime, days, scanned);
+                }
+
+                Candidate next = pq.peek();
+                if (next == null || best.currentScore >= next.currentScore) {
+                    break;
+                }
+                pq.offer(best);
+            }
+
+            if (best == null || best.currentScore <= 0) {
+                break;
+            }
+
+            // Registrieren
+            currentTime += best.bank.bankDays();
+
+            // Münzen zum Scannen auswählen
+            int cap = Math.min(best.bank.transactionCount() * (days - currentTime), best.coinIDs.length);
+            List<Integer> toScan = new ArrayList<>(cap);
+            int taken = 0;
+            for (int coinId : best.coinIDs) {
+                if (!scanned[coinId]) {
+                    scanned[coinId] = true;
+                    toScan.add(coinId);
+                    if (++taken == cap) break;
                 }
             }
 
-            // Potential-Score: Wert pro Tag unter idealen Bedingungen
-            double potential = (double) totalValue / (bank.bankDays() +
-                    Math.ceil((double)uniqueCoins / bank.transactionCount()));
-            bankPotential.put(bank, potential);
+            output.add(new OutputBank(best.bankIndex, toScan));
+            // best.bank wird nicht zurück in pq gegeben, da abgearbeitet
         }
 
-        while (currentDay < days && !availableBanks.isEmpty()) {
-            double bestScore = -1;
-            int bestBankIndex = -1;
-            List<Integer> bestCoins = null;
-            int bestDaysUsed = 0;
-
-            // Bewerte jede Bank mit tieferem Lookahead (bis zu 3 Banken)
-            for (int i = 0; i < availableBanks.size(); i++) {
-                Bank bank = availableBanks.get(i);
-                int remainingDays = days - currentDay;
-
-                if (bank.bankDays() >= remainingDays) continue;
-
-                // Simuliere diese Bank
-                Set<Integer> tempScanned = new HashSet<>(scannedCoins);
-                List<Integer> bankCoins = simulateCollection(bank, remainingDays - bank.bankDays(),
-                        tempScanned, task.coinValues());
-
-                if (bankCoins.isEmpty()) continue;
-
-                // Berechne Gesamtzeit und Wert
-                int totalValue = calculateValue(bankCoins, task.coinValues());
-                int samplingDays = calculateSamplingDays(bankCoins.size(), bank.transactionCount());
-                int totalDays = bank.bankDays() + samplingDays;
-
-                // Start-Score dieser Bank
-                double baseScore = (double) totalValue / totalDays;
-
-                // Rekursive Bewertung mit Lookahead (bis zu 2 weitere Banken)
-                double lookaheadBonus = evaluateLookahead(
-                        availableBanks, i, currentDay + totalDays,
-                        new HashSet<>(tempScanned), task, days, 0, 2);
-
-                // Gewichteter Gesamt-Score mit abnehmendem Gewicht für weitere Lookaheads
-                double finalScore = baseScore + lookaheadBonus;
-
-                if (finalScore > bestScore) {
-                    bestScore = finalScore;
-                    bestBankIndex = i;
-                    bestCoins = bankCoins;
-                    bestDaysUsed = totalDays;
-                }
-            }
-
-            if (bestBankIndex == -1) break;
-
-            // Gewählte Bank anwenden
-            Bank chosenBank = availableBanks.get(bestBankIndex);
-            output.add(new OutputBank(task.bankList().indexOf(chosenBank), bestCoins));
-            scannedCoins.addAll(bestCoins);
-            currentDay += bestDaysUsed;
-            availableBanks.remove(bestBankIndex);
-        }
-
-        // Output formatieren
+        // Ausgabe formatieren
         saver.append(String.valueOf(output.size()));
         for (OutputBank ob : output) {
             saver.append(ob.bankId + " " + ob.coins.size());
-            for (Integer coin : ob.coins) {
-                saver.appendIn(coin.toString());
+            for (int c : ob.coins) {
+                saver.appendIn(String.valueOf(c));
             }
             saver.append("");
         }
     }
 
-    // Rekursive Lookahead-Bewertung
-    private static double evaluateLookahead(List<Bank> banks, int currentBankIndex,
-                                            int startDay, Set<Integer> scannedCoins,
-                                            Task task, int totalDays, int depth, int maxDepth) {
-        if (depth >= maxDepth || startDay >= totalDays || banks.size() <= 1) {
-            return 0;
+    private static class Candidate implements Comparable<Candidate> {
+        final int bankIndex;
+        final Bank bank;
+        final int[] coinIDs;
+        double currentScore = 0;
+
+        Candidate(int bankIndex, Bank bank, int[] sortedCoins) {
+            this.bankIndex = bankIndex;
+            this.bank = bank;
+            this.coinIDs = sortedCoins;
         }
 
-        double bestNextScore = 0;
-
-        for (int i = 0; i < banks.size(); i++) {
-            if (i == currentBankIndex) continue;
-
-            Bank nextBank = banks.get(i);
-            int remainingDays = totalDays - startDay;
-
-            if (nextBank.bankDays() >= remainingDays) continue;
-
-            // Simuliere die nächste Bank
-            Set<Integer> tempScanned = new HashSet<>(scannedCoins);
-            List<Integer> nextCoins = simulateCollection(nextBank,
-                    remainingDays - nextBank.bankDays(), tempScanned, task.coinValues());
-
-            if (nextCoins.isEmpty()) continue;
-
-            int nextValue = calculateValue(nextCoins, task.coinValues());
-            int samplingDays = calculateSamplingDays(nextCoins.size(), nextBank.transactionCount());
-            int nextTotalDays = nextBank.bankDays() + samplingDays;
-
-            double nextScore = (double) nextValue / nextTotalDays;
-
-            // Tieferer Lookahead mit abnehmender Gewichtung
-            double deeperLookahead = evaluateLookahead(
-                    banks, i, startDay + nextTotalDays,
-                    new HashSet<>(tempScanned), task, totalDays, depth + 1, maxDepth);
-
-            double weightFactor = 1.0 / (depth + 1);
-            double combinedScore = nextScore + deeperLookahead * weightFactor;
-
-            bestNextScore = Math.max(bestNextScore, combinedScore);
-        }
-
-        return bestNextScore;
-    }
-
-    private static List<Integer> simulateCollection(Bank bank, int availableDays,
-                                                    Set<Integer> scannedCoins, int[] coinValues) {
-        List<Integer> coins = new ArrayList<>();
-        int maxCoins = Math.min(bank.transactionCount() * availableDays, bank.bankCoinIDs().length);
-
-        for (int i = 0; i < maxCoins; i++) {
-            int coinId = bank.bankCoinIDs()[i];
-            if (!scannedCoins.contains(coinId)) {
-                coins.add(coinId);
-                scannedCoins.add(coinId);
+        void recalc(int currentTime, int totalDays, boolean[] scanned) {
+            int regEnd = currentTime + bank.bankDays();
+            int availDays = totalDays - regEnd;
+            if (availDays <= 0) {
+                currentScore = 0;
+                return;
             }
+            int cap = Math.min(bank.transactionCount() * availDays, coinIDs.length);
+            long sum = 0;
+            int taken = 0;
+            for (int id : coinIDs) {
+                if (!scanned[id]) {
+                    sum += coinValues[id];
+                    if (++taken == cap) break;
+                }
+            }
+            currentScore = (double) sum / bank.bankDays();
         }
 
-        return coins;
-    }
-
-    private static int calculateValue(List<Integer> coins, int[] coinValues) {
-        int value = 0;
-        for (Integer coinId : coins) {
-            value += coinValues[coinId];
-        }
-        return value;
-    }
-
-    private static int calculateSamplingDays(int coinCount, int transactionsPerDay) {
-        return (int) Math.ceil((double) coinCount / transactionsPerDay);
-    }
-
-    static class OutputBank {
-        int bankId;
-        List<Integer> coins;
-
-        OutputBank(int bankId, List<Integer> coins) {
-            this.bankId = bankId;
-            this.coins = coins;
+        @Override
+        public int compareTo(Candidate o) {
+            return Double.compare(o.currentScore, this.currentScore);
         }
     }
+
+    private record OutputBank(int bankId, List<Integer> coins) {}
 }
