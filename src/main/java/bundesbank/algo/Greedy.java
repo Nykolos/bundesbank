@@ -205,5 +205,5 @@ public class Greedy {
         }
     }
 
-    private static record OutputBank(int bankId, List<Integer> coins) {}
+    private record OutputBank(int bankId, List<Integer> coins) {}
 }
