@@ -6,6 +6,10 @@ import bundesbank.file.Task;
 
 import java.util.*;
 
+/**
+ * Greedy-Algorithmus mit mehrfachen Starts und leichtem Zufalls-Tiebreaking,
+ * um aus schwierigen Fällen höhere Punktzahlen zu erreichen.
+ */
 public class Greedy {
     private static int[] coinValues;
 
@@ -13,84 +17,72 @@ public class Greedy {
         List<Bank> banks = task.bankList();
         coinValues = task.coinValues();
         int M = coinValues.length;
+        int B = banks.size();
 
-        // Flags für bereits gescannte Münzen
-        boolean[] scanned = new boolean[M];
-
-        // Pro Bank: Münz-IDs absteigend nach Wert sortieren
-        List<int[]> sortedCoins = new ArrayList<>(banks.size());
+        // 0) Vorberechnung: Für jede Bank Münzen nach Wert absteigend sortieren
+        List<int[]> sortedCoins = new ArrayList<>(B);
         for (Bank b : banks) {
             int[] raw = b.bankCoinIDs();
             Integer[] boxed = Arrays.stream(raw).boxed().toArray(Integer[]::new);
             Arrays.sort(boxed, (a, b2) -> Integer.compare(coinValues[b2], coinValues[a]));
-            sortedCoins.add(Arrays.stream(boxed).mapToInt(i -> i).toArray());
+            int[] sorted = Arrays.stream(boxed).mapToInt(i -> i).toArray();
+            sortedCoins.add(sorted);
         }
 
-        // 1) Kandidaten erstellen und initial ihren Score bei currentTime=0 berechnen
-        PriorityQueue<Candidate> pq = new PriorityQueue<>();
-        for (int i = 0; i < banks.size(); i++) {
-            Candidate c = new Candidate(i, banks.get(i), sortedCoins.get(i));
-            c.recalc(0, days, scanned);   // Initial-Pass
-            if (c.currentScore > 0) {
-                pq.offer(c);
-            }
-        }
+        // 1) Mehrere Greedy-Starts mit leichtem Zufalls-Tiebreaking
+        int runs = 10;
+        Random runRnd = new Random(42);
+        List<OutputBank> bestOverall = null;
+        int bestScore = -1;
 
-        int currentTime = 0;
-        List<OutputBank> output = new ArrayList<>();
+        for (int run = 0; run < runs; run++) {
+            boolean[] scanned = new boolean[M];
+            PriorityQueue<Candidate> pq = buildQueue(banks, sortedCoins, days, scanned, runRnd);
 
-        // 2) Dynamisch picken, lazy nachrechnen, registrieren, scannen
-        while (currentTime < days && !pq.isEmpty()) {
-            Candidate best;
-            // lazy pop & recalc
-            while (true) {
-                best = pq.poll();
-                if (best == null) break;
+            int currentTime = 0;
+            List<OutputBank> output = new ArrayList<>();
 
-                // Score neu berechnen mit echtem currentTime
-                best.recalc(currentTime, days, scanned);
+            // 2) Standard-Greedy mit lazy Recalc
+            while (currentTime < days && !pq.isEmpty()) {
+                Candidate best = popBest(pq, currentTime, days, scanned, runRnd);
+                if (best == null || best.currentScore <= 0) break;
 
-                Candidate next = pq.peek();
-                if (next == null || best.currentScore >= next.currentScore) {
-                    break;
+                // Registrierung
+                currentTime += best.bank.bankDays();
+                int availDays = days - currentTime;
+                if (availDays <= 0) break;
+
+                // Kapazität
+                long rawCap = (long) best.bank.transactionCount() * availDays;
+                int cap = (int) Math.min(rawCap, best.coinIDs.length);
+                cap = Math.max(0, cap);
+
+                // Münzen auswählen
+                List<Integer> toScan = new ArrayList<>(cap);
+                int taken = 0;
+                for (int id : best.coinIDs) {
+                    if (!scanned[id]) {
+                        scanned[id] = true;
+                        toScan.add(id);
+                        if (++taken == cap) break;
+                    }
                 }
-                pq.offer(best);
-            }
-            if (best == null || best.currentScore <= 0) {
-                break;
-            }
-
-            // Registrierung abschließen
-            currentTime += best.bank.bankDays();
-            int availDays = days - currentTime;
-            if (availDays <= 0) {
-                break;
-            }
-
-            // Kapazität (long-Zwischenschritt + Clamp ≥0)
-            long rawCap = (long) best.bank.transactionCount() * availDays;
-            int cap = (int) Math.min(rawCap, best.coinIDs.length);
-            cap = Math.max(0, cap);
-
-            // Münzen auswählen
-            List<Integer> toScan = new ArrayList<>(cap);
-            int taken = 0;
-            for (int id : best.coinIDs) {
-                if (!scanned[id]) {
-                    scanned[id] = true;
-                    toScan.add(id);
-                    if (++taken == cap) break;
+                if (!toScan.isEmpty()) {
+                    output.add(new OutputBank(best.bankIndex, toScan));
                 }
             }
-            if (!toScan.isEmpty()) {
-                output.add(new OutputBank(best.bankIndex, toScan));
+
+            // 3) Score simulieren und besten Lauf merken
+            int score = simulateScore(output, coinValues, banks, days);
+            if (score > bestScore) {
+                bestScore = score;
+                bestOverall = output;
             }
-            // Diese Bank kommt nicht mehr zurück in die Queue
         }
 
-        // 3) Ausgabe formatieren
-        saver.append(String.valueOf(output.size()));
-        for (OutputBank ob : output) {
+        // 4) Ausgabe der besten gefundene Lösung
+        saver.append(String.valueOf(bestOverall.size()));
+        for (OutputBank ob : bestOverall) {
             saver.append(ob.bankId + " " + ob.coins.size());
             for (int c : ob.coins) {
                 saver.appendIn(String.valueOf(c));
@@ -99,23 +91,86 @@ public class Greedy {
         }
     }
 
+    /** Baut die initiale PriorityQueue für einen Lauf auf */
+    private static PriorityQueue<Candidate> buildQueue(
+            List<Bank> banks,
+            List<int[]> sortedCoins,
+            int days,
+            boolean[] scanned,
+            Random rnd) {
+        PriorityQueue<Candidate> pq = new PriorityQueue<>();
+        for (int i = 0; i < banks.size(); i++) {
+            Candidate c = new Candidate(i, banks.get(i), sortedCoins.get(i));
+            c.recalc(0, days, scanned, rnd);
+            if (c.currentScore > 0) {
+                pq.offer(c);
+            }
+        }
+        return pq;
+    }
+
+    /** Poppt das beste Candidate-Objekt mit lazy Recalc und Zufallsjusierung */
+    private static Candidate popBest(
+            PriorityQueue<Candidate> pq,
+            int currentTime,
+            int days,
+            boolean[] scanned,
+            Random rnd) {
+        while (!pq.isEmpty()) {
+            Candidate best = pq.poll();
+            best.recalc(currentTime, days, scanned, rnd);
+            Candidate next = pq.peek();
+            if (next == null || best.currentScore + 1e-8 >= next.currentScore) {
+                return best;
+            }
+            pq.offer(best);
+        }
+        return null;
+    }
+
+    /** Simuliert den exakten Score einer Lösungsfolge */
+    private static int simulateScore(
+            List<OutputBank> seq,
+            int[] coinValues,
+            List<Bank> banks,
+            int totalDays) {
+        boolean[] seen = new boolean[coinValues.length];
+        int time = 0, score = 0;
+        for (OutputBank ob : seq) {
+            Bank b = banks.get(ob.bankId);
+            time += b.bankDays();
+            int avail = totalDays - time;
+            if (avail <= 0) break;
+            int cap = Math.min(b.transactionCount() * avail, ob.coins.size());
+            int taken = 0;
+            for (int c : ob.coins) {
+                if (!seen[c]) {
+                    seen[c] = true;
+                    score += coinValues[c];
+                    if (++taken == cap) break;
+                }
+            }
+        }
+        return score;
+    }
+
     private static class Candidate implements Comparable<Candidate> {
         final int bankIndex;
         final Bank bank;
         final int[] coinIDs;
         double currentScore;
 
-        Candidate(int bankIndex, Bank bank, int[] sortedCoins) {
-            this.bankIndex   = bankIndex;
-            this.bank        = bank;
-            this.coinIDs     = sortedCoins;
-            this.currentScore = 0;
+        Candidate(int bankIndex, Bank bank, int[] coinIDs) {
+            this.bankIndex = bankIndex;
+            this.bank = bank;
+            this.coinIDs = coinIDs;
         }
 
         /**
-         * Berechnet currentScore = (Summe der noch ungescannten Top-cap-Münzen) / Registrierungsdauer
+         * Berechnet currentScore = (Summe der ungescannten Top-cap-Münzen) / Registrierungsdauer
+         * plus eine kleine Zufallskomponente zum Tiebreaking.
          */
-        void recalc(int currentTime, int totalDays, boolean[] scanned) {
+        void recalc(int currentTime, int totalDays, boolean[] scanned, Random rnd) {
             int regDays = bank.bankDays();
             int endReg = currentTime + regDays;
             int avail = totalDays - endReg;
@@ -124,7 +179,6 @@ public class Greedy {
                 return;
             }
 
-            // cap = min(P_j * avail, Anzahl Münzen), mit long zum Schutz vor Überlauf
             long raw = (long) bank.transactionCount() * avail;
             int cap = (int) Math.min(raw, coinIDs.length);
             cap = Math.max(0, cap);
@@ -137,15 +191,19 @@ public class Greedy {
                     if (++cnt == cap) break;
                 }
             }
-            currentScore = sum > 0 ? (double) sum / regDays : 0;
+            if (sum <= 0) {
+                currentScore = 0;
+            } else {
+                currentScore = (double) sum / regDays
+                        + rnd.nextDouble() * 1e-8;
+            }
         }
 
         @Override
         public int compareTo(Candidate o) {
-            // höchste Scores zuerst
             return Double.compare(o.currentScore, this.currentScore);
         }
     }
 
-    private record OutputBank(int bankId, List<Integer> coins) {}
+    private static record OutputBank(int bankId, List<Integer> coins) {}
 }
