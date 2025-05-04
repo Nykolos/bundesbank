@@ -19,7 +19,7 @@ public class Greedy {
         int M = coinValues.length;
         int B = banks.size();
 
-        // 0) Vorberechnung: Für jede Bank Münzen nach Wert absteigend sortieren
+        // Vorberechnung: Für jede Bank Münzen nach Wert absteigend sortieren
         List<int[]> sortedCoins = new ArrayList<>(B);
         for (Bank b : banks) {
             int[] raw = b.bankCoinIDs();
@@ -29,7 +29,7 @@ public class Greedy {
             sortedCoins.add(sorted);
         }
 
-        // 1) Mehrere Greedy-Starts mit leichtem Zufalls-Tiebreaking
+        // Mehrere Greedy-Starts mit leichtem Zufalls-Tiebreaking
         int runs = 10;
         Random runRnd = new Random(42);
         List<OutputBank> bestOverall = null;
@@ -42,7 +42,7 @@ public class Greedy {
             int currentTime = 0;
             List<OutputBank> output = new ArrayList<>();
 
-            // 2) Standard-Greedy mit lazy Recalc
+            // Standard-Greedy mit lazy Recalc
             while (currentTime < days && !pq.isEmpty()) {
                 Candidate best = popBest(pq, currentTime, days, scanned, runRnd);
                 if (best == null || best.currentScore <= 0) break;
@@ -72,7 +72,7 @@ public class Greedy {
                 }
             }
 
-            // 3) Score simulieren und besten Lauf merken
+            // Score simulieren und besten Lauf merken
             int score = simulateScore(output, coinValues, banks, days);
             if (score > bestScore) {
                 bestScore = score;
@@ -80,7 +80,7 @@ public class Greedy {
             }
         }
 
-        // 4) Ausgabe der besten gefundene Lösung
+        // Ausgabe der besten gefundene Lösung
         saver.append(String.valueOf(bestOverall.size()));
         for (OutputBank ob : bestOverall) {
             saver.append(ob.bankId + " " + ob.coins.size());
@@ -91,7 +91,7 @@ public class Greedy {
         }
     }
 
-    /** Baut die initiale PriorityQueue für einen Lauf auf */
+    // Baut die initiale PriorityQueue für einen Lauf auf
     private static PriorityQueue<Candidate> buildQueue(
             List<Bank> banks,
             List<int[]> sortedCoins,
@@ -109,7 +109,7 @@ public class Greedy {
         return pq;
     }
 
-    /** Poppt das beste Candidate-Objekt mit lazy Recalc und Zufallsjusierung */
+    // Poppt das beste Candidate-Objekt mit lazy Recalc und Zufallsjusierung
     private static Candidate popBest(
             PriorityQueue<Candidate> pq,
             int currentTime,
@@ -128,7 +128,7 @@ public class Greedy {
         return null;
     }
 
-    /** Simuliert den exakten Score einer Lösungsfolge */
+    // Simuliert den exakten Score einer Lösungsfolge
     private static int simulateScore(
             List<OutputBank> seq,
             int[] coinValues,
